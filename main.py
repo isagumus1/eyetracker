@@ -1,8 +1,22 @@
+from gaze_tracking import GazeTracking
+from pynput.mouse import Controller
 import cv2
 import numpy as np
-from pynput.mouse import Controller
+import tkinter as tk
 
-# Initialize mouse controller
+# Function to get the screen resolution
+def get_screen_resolution():
+    root = tk.Tk()
+    root.withdraw()  # Hide the root window
+    width = root.winfo_screenwidth()
+    height = root.winfo_screenheight()
+    return width, height
+
+# Fetch screen resolution dynamically
+screen_width, screen_height = get_screen_resolution()
+
+# Initialize gaze tracker and mouse controller
+gaze = GazeTracking()
 mouse = Controller()
 
 # Start video capture
@@ -11,45 +25,55 @@ if not cap.isOpened():
     print("Error: Camera not detected.")
     exit()
 
-# Load pre-trained Haar cascades for eye detection
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+# Initialize previous gaze position for calculating deltas
+prev_horizontal_ratio, prev_vertical_ratio = None, None
+
+# Movement smoothing and sensitivity
+time_constant = 3.0  # Adjustable time constant for the filter (in seconds)
+sensitivity = 4  # Sensitivity coefficient (adjust for faster/slower movement)
+filtered_delta_x, filtered_delta_y = 0, 0  # Filtered deltas
 
 while True:
-    # Capture frame-by-frame
     ret, frame = cap.read()
     if not ret:
         break
 
-    # Convert to grayscale for detection
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    # Analyze gaze direction
+    gaze.refresh(frame)
+    frame = gaze.annotated_frame()
 
-    # Detect eyes
-    eyes = eye_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+    # Get horizontal and vertical gaze ratio
+    horizontal_ratio = gaze.horizontal_ratio()  # 0 (left) to 1 (right)
+    vertical_ratio = gaze.vertical_ratio()      # 0 (top) to 1 (bottom)
 
-    for (x, y, w, h) in eyes[:1]:  # Focus on one eye
-        # Get the center of the eye
-        eye_center = (x + w // 2, y + h // 2)
+    if horizontal_ratio is not None and vertical_ratio is not None:
+        # Calculate deltas if previous position exists
+        if prev_horizontal_ratio is not None and prev_vertical_ratio is not None:
+            delta_x = (horizontal_ratio - prev_horizontal_ratio) * screen_width * sensitivity
+            delta_y = (vertical_ratio - prev_vertical_ratio) * screen_height * sensitivity
 
-        # Map the eye position to screen size
-        screen_width, screen_height = 1920, 1080  # Adjust to your screen size
-        cam_width, cam_height = cap.get(3), cap.get(4)
+            # Apply smoothing using a first-order filter
+            alpha = 1 - np.exp(-1 / time_constant)  # Smoothing factor
+            filtered_delta_x = alpha * delta_x + (1 - alpha) * filtered_delta_x
+            filtered_delta_y = alpha * delta_y + (1 - alpha) * filtered_delta_y
 
-        mapped_x = int(eye_center[0] * screen_width / cam_width)*0.8
-        mapped_y = int(eye_center[1] * screen_height / cam_height)*0.8
+            # Move the mouse incrementally
+            current_position = mouse.position
+            mouse.position = (
+                max(0, min(screen_width - 1, int(current_position[0] - filtered_delta_x))),
+                max(0, min(screen_height - 1, int(current_position[1] + filtered_delta_y)))
+            )
 
-        # Move the mouse
-        mouse.position = (mapped_x, mapped_y)
+        # Update previous gaze position
+        prev_horizontal_ratio = horizontal_ratio
+        prev_vertical_ratio = vertical_ratio
 
-        # Draw a rectangle around the eye
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
-
-    # Display the frame
-    cv2.imshow('Eye Tracker', frame)
+    # Display the video feed with gaze tracking annotations
+    cv2.imshow("Gaze Tracking", frame)
 
     # Exit on pressing 'q'
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# Release resources
 cap.release()
 cv2.destroyAllWindows()
